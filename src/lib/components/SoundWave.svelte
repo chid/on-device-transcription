@@ -5,11 +5,16 @@
 	// Libs
 	import WaveSurfer from "wavesurfer.js";
 	import RegionsPlugin from "wavesurfer.js/plugins/regions";
-	import { Segment } from "$lib/ratchet/ratchet-web";
+	import type { Segment } from "$lib/ratchet/ratchet-web";
+	import {
+		areSegmentsChronological,
+		findSegmentIndexByTime,
+		findSegmentIndexByTimeLinear,
+	} from "$lib/utils/segments";
 
 	// Props
 	export let blobURL: string;
-    export let segments: Segment[] = [];
+	export let segments: Segment[] = [];
 
 	// Variables
 	let waveSurfer: WaveSurfer | null = null;
@@ -17,18 +22,13 @@
 	let container: HTMLDivElement;
 	let isAudioPlaying = false;
 	let region: any;
-    let currentSegment: Segment | undefined = undefined;
+	let currentSegmentIndex = -1;
+	$: canUseIndexedLookup = areSegmentsChronological(segments);
 
-    
-	function findSegmentByTime(seconds: number): Segment | undefined {
-        return segments.find((segment) => segment.start <= seconds && segment.stop >= seconds);
-	}
-
-	function scrollToSegment(segment: Segment) {
-        let index = segments.indexOf(segment);
-		const segmentElement = document.querySelector(`#segment-${index}`); 
+	function scrollToSegment(index: number) {
+		const segmentElement = document.getElementById(`segment-${index}`);
 		if (segmentElement) {
-			segmentElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+			segmentElement.scrollIntoView({ behavior: "smooth", block: "center" });
 		}
 	}
 
@@ -43,7 +43,17 @@
 		});
 		regionPlugin = waveSurfer.registerPlugin(RegionsPlugin.create());
 
-        waveSurfer.on("timeupdate", scroll);
+		waveSurfer.on("timeupdate", scroll);
+		waveSurfer.on("play", () => {
+			isAudioPlaying = true;
+		});
+		waveSurfer.on("pause", () => {
+			isAudioPlaying = false;
+		});
+		waveSurfer.on("finish", () => {
+			isAudioPlaying = false;
+			currentSegmentIndex = -1;
+		});
 
 		return () => {
 			waveSurfer?.destroy();
@@ -66,11 +76,11 @@
 	export function playSegment() {
 		if (!waveSurfer || !region) return;
 		region.play();
-		isAudioPlaying = true;
 	}
 
 	export function selectRegion(segment: Segment) {
 		if (!waveSurfer || !regionPlugin) return;
+		regionPlugin.clearRegions();
 		region = regionPlugin.addRegion({
 			start: segment.start,
 			end: segment.stop,
@@ -78,19 +88,28 @@
 		});
 	}
 
-    function scroll() {
+	function scroll() {
 		if (!waveSurfer) return;
 
-		const curSeg = findSegmentByTime(waveSurfer.getCurrentTime());
-		if (curSeg && curSeg !== currentSegment) {
-			currentSegment = curSeg;
-			scrollToSegment(curSeg);
+		const currentTime = waveSurfer.getCurrentTime();
+		const nextSegmentIndex = canUseIndexedLookup
+			? findSegmentIndexByTime(segments, currentTime)
+			: findSegmentIndexByTimeLinear(segments, currentTime);
+		if (nextSegmentIndex === -1) {
+			currentSegmentIndex = -1;
+			return;
+		}
+
+		if (nextSegmentIndex !== currentSegmentIndex) {
+			currentSegmentIndex = nextSegmentIndex;
+			scrollToSegment(nextSegmentIndex);
 		}
 	}
 
 	export function clearRegions() {
 		if (!regionPlugin) return;
 		regionPlugin.clearRegions();
+		region = null;
 	}
 </script>
 

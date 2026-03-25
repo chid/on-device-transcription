@@ -1,6 +1,6 @@
 <script lang="ts">
 	// Svelte
-	import { onMount } from "svelte";
+	import { onDestroy, onMount } from "svelte";
 
 	// Libs
 	import {
@@ -9,7 +9,7 @@
 		default as init,
 		Task,
 		Quantization,
-		Segment,
+		type Segment,
 	} from "$lib/ratchet/ratchet-web";
 	import type { FFmpeg } from "@ffmpeg/ffmpeg";
 	import toast from "svelte-french-toast";
@@ -33,12 +33,31 @@
 	let result: any = null;
 	let isffmpegLoaded = false;
 	let blobURL = "";
+	let currentBlobURL = "";
 	let isGenerating = false;
 	let segments: Segment[] = [];
 	let showSoundWave = false;
 	let loadingPercentage = 0;
 	let errorOccurred = false;
+	const FILE_INPUT_ID_INITIAL = "file-upload-initial";
+	const FILE_INPUT_ID_RESULTS = "file-upload-results";
+	const FFMPEG_INPUT_PATH = "input";
+	const FFMPEG_OUTPUT_PATH = "output.pcm";
 	$: isReady = model !== null && ffmpeg !== null && toBlobURL !== null;
+
+	onDestroy(() => {
+		if (currentBlobURL) {
+			URL.revokeObjectURL(currentBlobURL);
+		}
+	});
+
+	function setBlobURL(nextBlobURL: string) {
+		if (currentBlobURL) {
+			URL.revokeObjectURL(currentBlobURL);
+		}
+		currentBlobURL = nextBlobURL;
+		blobURL = nextBlobURL;
+	}
 
 	onMount(() => {
 		const setupPromise = setup();
@@ -61,13 +80,7 @@
 		);
 	});
 
-	export function isSafari() {
-		const ua = navigator.userAgent.toLowerCase();
-		return ua.includes("safari") && !ua.includes("chrome");
-	}
-
 	async function setup() {
-		if (isSafari()) throw new Error("Safari is not supported now.");
 		if (!navigator.gpu) throw new Error("WebGPU not available.");
 		model = await loadModel();
 		if (!model) throw new Error("Unable to load the model.");
@@ -106,12 +119,20 @@
 	}
 
 	function pcm16ToIntFloat32(pcmData: ArrayBuffer) {
-		let int16Array = new Int16Array(pcmData);
-		let float32Array = new Float32Array(int16Array.length);
+		const int16Array = new Int16Array(pcmData);
+		const float32Array = new Float32Array(int16Array.length);
 		for (let i = 0; i < int16Array.length; i++) {
 			float32Array[i] = int16Array[i] / 32768.0;
 		}
 		return float32Array;
+	}
+
+	async function cleanupFFmpegFiles(paths: string[]) {
+		if (!ffmpeg) {
+			return;
+		}
+
+		await Promise.allSettled(paths.map((path) => ffmpeg?.deleteFile(path)));
 	}
 
 	async function transcode(audioData: Uint8Array) {
@@ -120,42 +141,47 @@
 			await loadFFMPEG();
 		}
 
-		let logStore = new Array();
-		ffmpeg.on("log", ({ type, message }) => {
+		const logStore: Array<{ type: string; message: string }> = [];
+		const handleLog = ({ type, message }: { type: string; message: string }) => {
 			logStore.push({ type, message });
-		});
+		};
+		ffmpeg.on("log", handleLog);
 
-		await ffmpeg.writeFile("input", audioData);
+		try {
+			await ffmpeg.writeFile(FFMPEG_INPUT_PATH, audioData);
 
-		const cmd = [
-			"-nostdin",
-			"-threads",
-			"0",
-			"-i",
-			"input",
-			"-f",
-			"s16le",
-			"-ac",
-			"1",
-			"-acodec",
-			"pcm_s16le",
-			"-loglevel",
-			"debug",
-			"-ar",
-			"16000",
-			"output.pcm",
-		];
+			const cmd = [
+				"-nostdin",
+				"-threads",
+				"0",
+				"-i",
+				FFMPEG_INPUT_PATH,
+				"-f",
+				"s16le",
+				"-ac",
+				"1",
+				"-acodec",
+				"pcm_s16le",
+				"-loglevel",
+				"error",
+				"-ar",
+				"16000",
+				FFMPEG_OUTPUT_PATH,
+			];
 
-		const exec_result = await ffmpeg.exec(cmd);
-		if (exec_result != 0) {
-			console.log("FFMPEG Error.");
-			logStore.forEach((log) => console.error(log));
-			return;
+			const execResult = await ffmpeg.exec(cmd);
+			if (execResult !== 0) {
+				console.log("FFMPEG Error.");
+				logStore.forEach((log) => console.error(log));
+				return;
+			}
+
+			const data = (await ffmpeg.readFile(FFMPEG_OUTPUT_PATH)) as Uint8Array;
+			return data.buffer;
+		} finally {
+			ffmpeg.off("log", handleLog);
+			await cleanupFFmpegFiles([FFMPEG_INPUT_PATH, FFMPEG_OUTPUT_PATH]);
 		}
-
-		const data = (await ffmpeg.readFile("output.pcm")) as any;
-		blobURL = URL.createObjectURL(new Blob([data.buffer], { type: "audio/wav" }));
-		return data.buffer;
 	}
 
 	async function runModel() {
@@ -163,30 +189,34 @@
 			return;
 		}
 		segments = [];
-		let builder = new DecodingOptionsBuilder();
-		let options = builder
+		const builder = new DecodingOptionsBuilder();
+		const options = builder
 			.setLanguage(configOptions.language ? configOptions.language : "en")
 			.setTask(configOptions.task)
 			.setSuppressBlank(configOptions.suppress_non_speech)
 			.build();
 		console.log("Options: ", options);
-		let callback = async (segment: Segment) => {
+		const callback = (segment: Segment) => {
 			if (segment.last) {
 				showSoundWave = true;
 				return;
 			}
-			segments.push(segment);
+			segments = [...segments, segment];
 		};
-		const results = await model.run({ audio: audioData, decode_options: options, callback: callback });
+		const results = await model.run({ audio: audioData, decode_options: options, callback });
 		return results;
 	}
 
-	async function handleAudioFile(event: any) {
-		const file = event.target.files[0];
+	async function handleAudioFile(event: Event) {
+		const target = event.target as HTMLInputElement;
+		const file = target.files?.[0];
 		if (!file) {
 			return;
 		}
-		blobURL = "";
+		setBlobURL("");
+		errorOccurred = false;
+		result = null;
+		segments = [];
 		showSoundWave = false;
 		isGenerating = true;
 
@@ -195,12 +225,12 @@
 			try {
 				const audioBytes = new Uint8Array(reader.result as ArrayBuffer);
 				const transcoded = await transcode(audioBytes);
-				if(!(transcoded instanceof ArrayBuffer)){
-						isGenerating = false;
-						return;
+				if (!(transcoded instanceof ArrayBuffer)) {
+					isGenerating = false;
+					return;
 				}
 				audioData = pcm16ToIntFloat32(transcoded);
-				blobURL = URL.createObjectURL(file);
+				setBlobURL(URL.createObjectURL(file));
 				result = await runModel();
 			} catch (e) {
 				if (e instanceof Error) {
@@ -213,6 +243,7 @@
 				}
 			} finally {
 				isGenerating = false;
+				target.value = "";
 			}
 		};
 		reader.readAsArrayBuffer(file);
@@ -275,17 +306,16 @@
 						<!-- Input -->
 						<div class="bg-white rounded-[22px]">
 							<input
-								on:input={handleAudioFile}
-								id="file-button"
+								on:change={handleAudioFile}
+								id={FILE_INPUT_ID_INITIAL}
 								type="file"
 								aria-hidden="true"
 								accept=".wav,.aac,.m4a,.mp4,.mp3"
-								placeholder="Upload an image"
 								class="hidden"
 								disabled={!isReady}
 							/>
 							<label
-								for="file-button"
+								for={FILE_INPUT_ID_INITIAL}
 								class="flex {isReady
 									? 'cursor-pointer'
 									: 'cursor-not-allowed'} flex-row items-center justify-center space-x-1 px-5 py-1"
@@ -338,17 +368,16 @@
 					</button>
 					<div>
 						<input
-							on:input={handleAudioFile}
-							id="file-button"
+							on:change={handleAudioFile}
+							id={FILE_INPUT_ID_RESULTS}
 							type="file"
 							aria-hidden="true"
 							accept=".wav,.aac,.m4a,.mp4,.mp3"
-							placeholder="Upload an image"
 							class="hidden"
 							disabled={!isReady}
 						/>
 						<label
-							for="file-button"
+							for={FILE_INPUT_ID_RESULTS}
 							class="flex {isReady
 								? 'cursor-pointer'
 								: 'cursor-not-allowed'} flex-row items-center justify-center space-x-1 px-5 py-1"

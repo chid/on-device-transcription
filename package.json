@@ -7,8 +7,9 @@
 		"dev": "vite dev",
 		"build:svelte": "vite build",
 		"preview": "vite preview",
-		"check": "svelte-kit sync && svelte-check --tsconfig ./jsconfig.json",
-		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./jsconfig.json --watch",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"benchmark:segments": "node --experimental-strip-types ./scripts/benchmark-segments.ts",
 		"pack": "electron-builder --dir",
 		"dev:electron": "electron --trace-warnings ./src/electron/index.js",
 		"build:electron": "electron-builder -m --config build.config.json",
@@ -39,9 +40,9 @@
 	"dependencies": {
 		"@ffmpeg/ffmpeg": "0.12.6",
 		"@ffmpeg/util": "^0.12.1",
-		"wavesurfer.js": "^7.7.15",
 		"@webgpu/types": "^0.1.40",
+		"svelte-french-toast": "^1.0.3",
 		"vite-plugin-string": "^1.2.3",
-		"svelte-french-toast": "^1.0.3"
+		"wavesurfer.js": "^7.7.15"
 	}
 }
